@@ -45,6 +45,66 @@ export async function saveState(state) {
   } catch (e) { /* non-fatal: quota or private mode */ }
 }
 
+/* Monotonic merge of two state blobs: progress only ever goes up.
+   Safe on null/undefined inputs — treats them as empty state. */
+export function mergeState(a, b) {
+  const A = a || emptyState;
+  const B = b || emptyState;
+
+  const words = {};
+  const aw = A.words || {};
+  const bw = B.words || {};
+  for (const id of new Set([...Object.keys(aw), ...Object.keys(bw)])) {
+    const wa = aw[id];
+    const wb = bw[id];
+    if (!wa || !wb) {
+      const only = wa || wb;
+      words[id] = { ...only, sentences: [...(only.sentences || [])] };
+      continue;
+    }
+    // Higher stage wins; ties broken by later nextDue.
+    const sa = wa.stage || 0;
+    const sb = wb.stage || 0;
+    const lead =
+      sb > sa ? wb :
+      sb < sa ? wa :
+      String(wb.nextDue || "") > String(wa.nextDue || "") ? wb : wa;
+    const sentences = [...(wa.sentences || [])];
+    for (const s of wb.sentences || []) if (!sentences.includes(s)) sentences.push(s);
+    const dates = [wa.learnedOn, wb.learnedOn].filter(Boolean).sort();
+    words[id] = {
+      ...lead,
+      learnedOn: dates[0] || null,
+      lapses: Math.max(wa.lapses || 0, wb.lapses || 0),
+      sentences,
+    };
+  }
+
+  const history = {};
+  const ah = A.history || {};
+  const bh = B.history || {};
+  for (const d of new Set([...Object.keys(ah), ...Object.keys(bh)])) {
+    const ha = ah[d] || {};
+    const hb = bh[d] || {};
+    history[d] = {
+      newWords: Math.max(ha.newWords || 0, hb.newWords || 0),
+      reviews: Math.max(ha.reviews || 0, hb.reviews || 0),
+    };
+  }
+
+  const am = A.movesSeen || [];
+  const bm = B.movesSeen || [];
+  const [base, other] = am.length >= bm.length ? [am, bm] : [bm, am];
+  const movesSeen = [...base];
+  for (const m of other) if (!movesSeen.includes(m)) movesSeen.push(m);
+
+  const la = A.lastActive || null;
+  const lb = B.lastActive || null;
+  const lastActive = !la ? lb : !lb ? la : la > lb ? la : lb;
+
+  return { words, history, movesSeen, lastActive };
+}
+
 export function computeStreak(history) {
   let streak = 0;
   let day = todayStr();

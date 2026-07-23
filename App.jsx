@@ -3,23 +3,61 @@ import { BANK } from "./bank.js";
 import { MOVES } from "./moves.js";
 import {
   INTERVALS, DAILY_NEW, FLOOR_NEW, todayStr, addDays,
-  loadState, saveState, dueReviews, unlearnedFamilies, css, T, S,
+  saveState, dueReviews, unlearnedFamilies, css, T, S,
 } from "./core.js";
+import { supabase, hydrate, persist, flush } from "./sync.js";
 import { Home, ReviewCard, LearnCard, MoveCard, Done, Ledger } from "./screens.jsx";
+import Login from "./Login.jsx";
 
 /* ----------------------- APP ----------------------- */
 
 export default function App() {
+  // session: undefined = still checking, null = signed out, object = active
+  const [session, setSession] = useState(undefined);
   const [state, setState] = useState(null);
   const [screen, setScreen] = useState("home"); // home | session | ledger | done
   const [queue, setQueue] = useState({ reviews: [], learns: [], move: null });
   const [pos, setPos] = useState({ phase: "review", i: 0 });
   const [summary, setSummary] = useState({ reviews: 0, learned: [], sentences: [], move: null });
 
-  useEffect(() => { loadState().then(setState); }, []);
-  useEffect(() => { if (state) saveState(state); }, [state]);
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => setSession(s ?? null));
+    return () => sub.subscription.unsubscribe();
+  }, []);
 
-  if (!state) {
+  const userId = session ? session.user.id : null;
+
+  // Hydrate on login: local + remote merged, written back to both.
+  useEffect(() => {
+    if (!userId) { setState(null); setScreen("home"); return; }
+    let stale = false;
+    hydrate(userId).then((merged) => { if (!stale) setState(merged); });
+    return () => { stale = true; };
+  }, [userId]);
+
+  // Local write immediate, remote write debounced.
+  useEffect(() => {
+    if (!state) return;
+    saveState(state);
+    if (userId) persist(userId, state);
+  }, [state]);
+
+  // Don't lose the tail of a session to the debounce window.
+  useEffect(() => {
+    const onUnload = () => { if (userId && state) flush(userId, state); };
+    window.addEventListener("beforeunload", onUnload);
+    return () => window.removeEventListener("beforeunload", onUnload);
+  }, [userId, state]);
+
+  const signOut = async () => {
+    if (userId && state) await flush(userId, state);
+    await supabase.auth.signOut();
+  };
+
+  if (session === null) return <Login />;
+
+  if (session === undefined || !state) {
     return (
       <div style={{ ...S.root, display: "flex", alignItems: "center", justifyContent: "center" }}>
         <style>{css}</style>
@@ -100,6 +138,18 @@ export default function App() {
     <div className="lexis-root" style={S.root}>
       <style>{css}</style>
       <div style={S.shell}>
+        {(screen === "home" || screen === "ledger") && (
+          <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "baseline", gap: 12, paddingTop: 14 }}>
+            <span style={{ ...S.small, color: T.faint }}>{session.user.email}</span>
+            <button
+              className="lexis-btn"
+              onClick={signOut}
+              style={{ background: "none", border: "none", padding: 0, fontFamily: T.body, fontSize: 13, color: T.faded, textDecoration: "underline" }}
+            >
+              Sign out
+            </button>
+          </div>
+        )}
         {screen === "home" && <Home state={state} begin={begin} browse={() => setScreen("ledger")} />}
         {screen === "ledger" && <Ledger state={state} home={() => setScreen("home")} />}
         {screen === "done" && <Done summary={summary} home={() => setScreen("home")} />}
